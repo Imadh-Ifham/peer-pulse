@@ -141,11 +141,22 @@ class AvailabilityService {
   async getTutorsWithAvailability(filters = {}) {
     const query = { role: "tutor" };
 
+    // If filtering by subject, find tutors whose availability lists that subject.
+    // Tutors set subjects via the AvailabilityManager which stores them in
+    // AvailabilityModel.subjects — not in User.skills — so we query the
+    // Availability collection first and restrict to those tutor IDs.
     if (filters.subject) {
-      query.skills = { $in: [filters.subject] };
+      const matchingAvailabilities = await AvailabilityModel.find({
+        subjects: { $in: [filters.subject] },
+      }).select("tutor");
+
+      const tutorIds = matchingAvailabilities.map((a) => a.tutor);
+      query._id = { $in: tutorIds };
     }
 
-    const tutors = await UserModel.find(query).select("name email skills bio reputationScore");
+    const tutors = await UserModel.find(query).select(
+      "name email skills bio reputationScore badge reviewCount"
+    );
 
     const tutorsWithAvailability = await Promise.all(
       tutors.map(async (tutor) => {

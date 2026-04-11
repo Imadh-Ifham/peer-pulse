@@ -1,43 +1,53 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
-import Login from "./pages/auth/login";
-import SignUp from "./pages/auth/signup";
-import ForgotPassword from "./pages/auth/forgot-password";
-import ConfirmAccount from "./pages/auth/confirm-account";
-import ResetPassword from "./pages/auth/reset-password";
-import VerifyMfa from "./pages/auth/verify-mfa";
-import Home from "./pages/home";
-import Session from "./pages/sessions";
-import AppLayout from "./layout/AppLayout";
-import BaseLayout from "./layout/BaseLayout";
-import AuthRoute from "./routes/auth.route";
-import PublicRoute from "./routes/public.route";
+import { lazy, Suspense } from 'react';
+import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom';
+import RegisterPage from '@/pages/auth/register';
+import LoginPage from '@/pages/auth/login';
+import HomePage from '@/pages/home';
+import { AuthProvider } from '@/context/AuthContext';
+import { ThreadProvider } from '@/context/ThreadContext';
+import { ProtectedRoute } from '@/routes/ProtectedRoute';
+import StudyHubPage from '@/pages/thread/StudyHubPage';
+import ThreadDetailsPage from '@/pages/thread/ThreadDetailsPage';
+import { Toaster } from '@/components/ui/toaster';
+
+const SessionsPage = lazy(() => import('@/pages/sessions'));
+const TutorsPage = lazy(() => import('@/pages/tutors'));
+const ReviewsPage = lazy(() => import('@/pages/reviews'));
+const LeaderboardPage = lazy(() => import('@/pages/leaderboard'));
+const ResourcePage = lazy(() => import('@/pages/resource/ResourcePage'));
 
 function App() {
   return (
-    <BrowserRouter>
-      <Routes>
-        <Route element={<PublicRoute />}>
-          <Route element={<BaseLayout />}>
-            <Route path="" element={<Login />} />
-            <Route path="signup" element={<SignUp />} />
-            <Route path="confirm-account" element={<ConfirmAccount />} />
-            <Route path="forgot-password" element={<ForgotPassword />} />
-            <Route path="reset-password" element={<ResetPassword />} />
-            <Route path="verify-mfa" element={<VerifyMfa />} />
-          </Route>
-        </Route>
+    <AuthProvider>
+      <ThreadProvider>
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <Suspense fallback={null}>
+            <Routes>
+              {/* Public Routes */}
+              <Route path="/" element={<Navigate to="/login" replace />} />
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
 
-        {/* Protected Route */}
-        <Route element={<AuthRoute />}>
-          <Route element={<AppLayout />}>
-            <Route path="home" element={<Home />} />
-            <Route path="sessions" element={<Session />} />
+              {/* Protected Routes */}
+              <Route element={<ProtectedRoute />}>
+                <Route path="/home" element={<HomePage />} />
+                <Route path="/threads" element={<StudyHubPage />} />
+                <Route path="/threads/:id" element={<ThreadDetailsPage />} />
+                <Route path="/study-hub" element={<Navigate to="/threads" replace />} />
+                <Route path="/resources" element={<ResourcePage />} />
+
+            {/* Booking फीature routes */}
+            <Route path="/sessions" element={<SessionsPage />} />
+            <Route path="/tutors" element={<TutorsPage />} />
+            <Route path="/reviews" element={<ReviewsPage />} />
+            <Route path="/leaderboard" element={<LeaderboardPage />} />
           </Route>
-        </Route>
-        {/* Catch-all for undefined routes */}
-        <Route path="*" />
-      </Routes>
+        </Routes>
+      </Suspense>
     </BrowserRouter>
+    <Toaster />
+  </ThreadProvider>
+</AuthProvider>
   );
 }
 

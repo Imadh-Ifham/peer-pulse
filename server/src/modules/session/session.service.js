@@ -11,7 +11,7 @@ const {
 const { ErrorCode } = require("../../common/enums/error-code.enum");
 const { logger } = require("../../common/utils/logger-utils");
 const { googleCalendarService } = require("../../integrations/google-calendar");
-const { sendEmail } = require("../../common/email/sendgrid.client");
+const { sendEmail, isSendgridReady } = require("../../common/email/sendgrid.client");
 
 class BookingService {
   /**
@@ -109,12 +109,26 @@ class BookingService {
       }
     }
 
-    const bookings = await BookingModel.find(query)
-      .populate("student", "name email")
-      .populate("tutor", "name email skills")
-      .sort({ scheduledAt: -1 });
+    const page = filters.page || 1;
+    const limit = filters.limit || 10;
+    const skip = (page - 1) * limit;
 
-    return bookings;
+    const [bookings, total] = await Promise.all([
+      BookingModel.find(query)
+        .populate("student", "name email")
+        .populate("tutor", "name email skills")
+        .sort({ scheduledAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      BookingModel.countDocuments(query),
+    ]);
+
+    return {
+      bookings,
+      total,
+      currentPage: page,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   /**
@@ -216,11 +230,18 @@ class BookingService {
       throw new ForbiddenException("Only the assigned tutor can accept this booking");
     }
 
-    if (booking.status !== BookingStatus.PENDING) {
-      throw new BadRequestException("Only pending bookings can be accepted");
+    if (booking.status === BookingStatus.ACCEPTED) {
+      // Idempotent: already accepted by this tutor — return existing booking
+      return booking;
     }
 
-    // Update booking status
+    if (booking.status !== BookingStatus.PENDING) {
+      throw new BadRequestException(
+        `Booking cannot be accepted (current status: ${booking.status})`
+      );
+    }
+
+    // Accept the booking
     booking.status = BookingStatus.ACCEPTED;
     if (acceptData.meetingLink) {
       booking.meetingLink = acceptData.meetingLink;
@@ -233,19 +254,18 @@ class BookingService {
 
     logger.info("Booking accepted", { bookingId, tutorId });
 
-    // Try to sync with Google Calendar
+    // Try to sync with Google Calendar (enrichment only — does not affect status)
     try {
       const calendarEvent = await googleCalendarService.createEvent(booking);
       if (calendarEvent) {
         booking.googleCalendarEventId = calendarEvent.id;
-        booking.status = BookingStatus.CONFIRMED;
 
-        // Use auto-generated Google Meet link if available
-        if (calendarEvent.meetLink) {
+        // Use auto-generated Google Meet link if no manual link was provided
+        if (calendarEvent.meetLink && !acceptData.meetingLink) {
           booking.meetingLink = calendarEvent.meetLink;
           logger.info("Auto-generated Google Meet link", { meetLink: calendarEvent.meetLink });
         }
-        
+
         await booking.save();
         logger.info("Booking synced with Google Calendar", {
           bookingId,
@@ -254,7 +274,45 @@ class BookingService {
       }
     } catch (error) {
       logger.warn("Failed to sync with Google Calendar", { bookingId, error: error.message });
-      // Continue without calendar sync - booking is still accepted
+      // Booking is already accepted — calendar sync failure is non-fatal
+    }
+
+    // Send review reminder guidance immediately after acceptance.
+    try {
+      if (!isSendgridReady) {
+        logger.warn("Review reminder email skipped: SendGrid not initialized", { bookingId });
+      } else if (booking?.student?.email && booking?.tutor?.name) {
+        const reviewLink = `${process.env.CLIENT_URL || "http://localhost:5173"}/sessions`;
+        const sendResult = await sendEmail({
+          to: booking.student.email,
+          subject: "Session accepted — review reminder",
+          text: `Your session with ${booking.tutor.name} has been accepted.
+
+Subject: ${booking.subject}
+Scheduled at: ${new Date(booking.scheduledAt).toLocaleString()}
+Duration: ${booking.duration} minutes
+
+After your session is completed, please come back and leave a review for your tutor.
+Review from: ${reviewLink}
+Booking: ${bookingId}`,
+        });
+        if (!sendResult?.ok) {
+          logger.warn("Review reminder email send failed", {
+            bookingId,
+            reason: sendResult?.reason,
+            error: sendResult?.error,
+          });
+        }
+      } else {
+        logger.warn("Review reminder email skipped: missing student/tutor email data", {
+          bookingId,
+        });
+      }
+    } catch (e) {
+      logger.warn("Failed to send accepted-session review reminder email", {
+        bookingId,
+        error: e?.message,
+      });
     }
 
     return booking;
@@ -357,9 +415,9 @@ class BookingService {
     }
 
     // Check if the scheduled time has passed
-    if (new Date(booking.scheduledAt) > new Date()) {
-      throw new BadRequestException("Cannot complete a booking before its scheduled time");
-    }
+    // if (new Date(booking.scheduledAt) > new Date()) {
+    //   throw new BadRequestException("Cannot complete a booking before its scheduled time");
+    // }
 
     booking.status = BookingStatus.COMPLETED;
     booking.completedAt = new Date();
@@ -368,18 +426,6 @@ class BookingService {
     logger.info("Booking completed", { bookingId, userId });
 
     const populated = await booking.populate(["student", "tutor"]);
-
-    try {
-      if (populated?.student?.email && populated?.tutor?.name) {
-        await sendEmail({
-          to: populated.student.email,
-          subject: "Please leave a review",
-          text: `Your session with ${populated.tutor.name} is completed. Please leave a review. Booking: ${bookingId}`,
-        });
-      }
-    } catch (e) {
-      logger.warn("Failed to send review request email", { bookingId, error: e?.message });
-    }
 
     return populated;
   }
